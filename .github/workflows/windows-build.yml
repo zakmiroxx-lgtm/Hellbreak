@@ -1,22 +1,21 @@
-name: Build Hellbreak Windows
+name: HELLBREAK Windows Build
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
-
-  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Build Hellbreak EXE
+    name: Build Hellbreak.exe
     runs-on: windows-2022
 
     steps:
-      - name: Download repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Python
@@ -24,136 +23,159 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Find and extract project
+      - name: Extract Hellbreak project
         shell: pwsh
         run: |
           @'
           import pathlib
-          import zipfile
           import shutil
-          import sys
+          import zipfile
 
           root = pathlib.Path.cwd()
 
-          def valid_project(path):
-              return (
-                  (path / "CMakeLists.txt").is_file()
-                  and (path / "src" / "main.cpp").is_file()
-              )
+          archives = sorted(root.glob("*.zip"))
 
-          if valid_project(root):
-              print("Project files found in repository root.")
-              sys.exit(0)
+          if archives:
+              archive = archives[0]
 
-          print("Searching for Hellbreak ZIP...")
+              print("Found ZIP:", archive.name)
 
-          archives = list(root.glob("*.zip"))
+              extract_dir = root / "_hellbreak_extract"
 
-          if not archives:
-              raise RuntimeError(
-                  "Neither project files nor ZIP archive found!"
-              )
+              extract_dir.mkdir(exist_ok=True)
 
-          archive = archives[0]
+              with zipfile.ZipFile(archive, "r") as z:
+                  z.extractall(extract_dir)
 
-          print("Archive:", archive.name)
+              candidates = [
+                  p.parent
+                  for p in extract_dir.rglob("CMakeLists.txt")
+                  if (p.parent / "src" / "main.cpp").exists()
+              ]
 
-          extract_dir = root / "_hellbreak_extracted"
-          extract_dir.mkdir(exist_ok=True)
-
-          with zipfile.ZipFile(archive, "r") as z:
-              bad = z.testzip()
-
-              if bad:
+              if not candidates:
                   raise RuntimeError(
-                      f"Corrupted archive entry: {bad}"
+                      "Cannot find Hellbreak project inside ZIP"
                   )
 
-              for member in z.infolist():
-                  destination = (
-                      extract_dir / member.filename
-                  ).resolve()
+              source = candidates[0]
 
-                  if not destination.is_relative_to(
-                      extract_dir.resolve()
-                  ):
-                      raise RuntimeError(
-                          "Unsafe path inside ZIP"
-                      )
+              print("Project directory:", source)
 
-              z.extractall(extract_dir)
+              for item in source.iterdir():
+                  target = root / item.name
 
-          projects = [
-              p.parent
-              for p in extract_dir.rglob("CMakeLists.txt")
-              if valid_project(p.parent)
-          ]
+                  if target.exists():
+                      if target.is_dir():
+                          shutil.rmtree(target)
+                      else:
+                          target.unlink()
 
-          if not projects:
+                  if item.is_dir():
+                      shutil.copytree(item, target)
+                  else:
+                      shutil.copy2(item, target)
+
+          cmake = root / "CMakeLists.txt"
+          main = root / "src" / "main.cpp"
+
+          if not cmake.exists() or not main.exists():
               raise RuntimeError(
-                  "Hellbreak project not found inside ZIP!"
+                  "Missing CMakeLists.txt or src/main.cpp"
               )
 
-          if len(projects) > 1:
-              raise RuntimeError(
-                  "Multiple projects found inside ZIP!"
-              )
-
-          project = projects[0]
-
-          print("Project directory:", project)
-
-          for item in project.iterdir():
-              destination = root / item.name
-
-              if destination.exists():
-                  raise RuntimeError(
-                      f"Destination already exists: {item.name}"
-                  )
-
-              if item.is_dir():
-                  shutil.copytree(item, destination)
-              else:
-                  shutil.copy2(item, destination)
-
-          print("Hellbreak extracted successfully!")
-          '@ | Set-Content extract.py -Encoding utf8
-
-          python extract.py
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Project extraction failed!"
-          }
+          print("Hellbreak project extracted successfully.")
+          '@ | python -
 
       - name: Verify source files
         shell: pwsh
         run: |
-          $required = @(
-            "CMakeLists.txt",
-            "src/main.cpp",
-            "src/Game.h",
-            "src/Game.cpp",
-            "src/Engine/Renderer.h",
-            "src/Engine/Renderer.cpp",
-            "src/Engine/Raycaster.h",
-            "src/Engine/Raycaster.cpp",
-            "src/World/Map.h",
-            "src/World/Map.cpp",
-            "src/World/Player.h",
-            "src/World/Player.cpp",
-            "src/World/Enemy.h",
-            "src/World/Enemy.cpp"
-          )
+          @'
+          from pathlib import Path
 
-          foreach ($file in $required) {
-            if (-not (Test-Path $file)) {
-              throw "Missing file: $file"
-            }
+          files = [
+              "src/main.cpp",
+              "src/Game.cpp",
+              "src/Game.h",
+              "src/Engine/Renderer.cpp",
+              "src/Engine/Renderer.h",
+              "src/Engine/Raycaster.cpp",
+              "src/Engine/Raycaster.h",
+              "src/World/Map.cpp",
+              "src/World/Map.h",
+              "src/World/Player.cpp",
+              "src/World/Player.h",
+              "src/World/Enemy.cpp",
+              "src/World/Enemy.h",
+          ]
 
-            Write-Host "OK: $file"
-          }
+          for filename in files:
+              path = Path(filename)
 
-      - name: Setup Visual Studio compiler
+              if not path.exists():
+                  raise RuntimeError(
+                      "Missing source file: " + filename
+                  )
+
+              print(
+                  "OK:",
+                  filename,
+                  "(",
+                  path.stat().st_size,
+                  "bytes )"
+              )
+
+          renderer = Path(
+              "src/Engine/Renderer.cpp"
+          ).read_text(encoding="utf-8-sig")
+
+          raycaster = Path(
+              "src/Engine/Raycaster.cpp"
+          ).read_text(encoding="utf-8-sig")
+
+          renderer_header = Path(
+              "src/Engine/Renderer.h"
+          ).read_text(encoding="utf-8-sig")
+
+          if "map.at(" in raycaster:
+              raise RuntimeError(
+                  "Raycaster.cpp still contains map.at()!"
+              )
+
+          if "map.tile(" not in raycaster:
+              raise RuntimeError(
+                  "Raycaster.cpp does not use map.tile()!"
+              )
+
+          if "Renderer::renderWorld" in raycaster:
+              raise RuntimeError(
+                  "Raycaster.cpp contains Renderer code!"
+              )
+
+          if "enemy.alive" in renderer:
+              raise RuntimeError(
+                  "Renderer.cpp still uses enemy.alive!"
+              )
+
+          if "enemy.x()" not in renderer:
+              raise RuntimeError(
+                  "Renderer.cpp does not use enemy.x()!"
+              )
+
+          if "enemy.y()" not in renderer:
+              raise RuntimeError(
+                  "Renderer.cpp does not use enemy.y()!"
+              )
+
+          if "std::vector<Enemy>" not in renderer_header:
+              raise RuntimeError(
+                  "Renderer.h has an outdated render signature!"
+              )
+
+          print("All source checks passed!")
+          '@ | python -
+
+      - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
 
       - name: Configure CMake
@@ -179,30 +201,27 @@ jobs:
             throw "Hellbreak compilation failed!"
           }
 
-      - name: Package Windows game
+      - name: Package Windows EXE
         shell: pwsh
         run: |
+          New-Item -ItemType Directory -Force -Path dist
+
           $exe = "build/Release/Hellbreak.exe"
 
-          if (-not (Test-Path $exe)) {
-            throw "Hellbreak.exe not found!"
+          if (!(Test-Path $exe)) {
+            throw "Hellbreak.exe was not generated!"
           }
-
-          New-Item -ItemType Directory `
-            -Path dist `
-            -Force | Out-Null
 
           Copy-Item $exe "dist/Hellbreak.exe"
 
           Compress-Archive `
-            -Path "dist/*" `
+            -Path "dist/Hellbreak.exe" `
             -DestinationPath "Hellbreak-Windows.zip" `
             -Force
 
-      - name: Upload game
+      - name: Upload Windows build
         uses: actions/upload-artifact@v4
         with:
           name: Hellbreak-Windows
           path: Hellbreak-Windows.zip
           if-no-files-found: error
-          retention-days: 30
