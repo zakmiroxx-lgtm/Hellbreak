@@ -1,1 +1,208 @@
+name: Build Hellbreak Windows
 
+on:
+  push:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Hellbreak EXE
+    runs-on: windows-2022
+
+    steps:
+      - name: Download repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Find and extract project
+        shell: pwsh
+        run: |
+          @'
+          import pathlib
+          import zipfile
+          import shutil
+          import sys
+
+          root = pathlib.Path.cwd()
+
+          def valid_project(path):
+              return (
+                  (path / "CMakeLists.txt").is_file()
+                  and (path / "src" / "main.cpp").is_file()
+              )
+
+          if valid_project(root):
+              print("Project files found in repository root.")
+              sys.exit(0)
+
+          print("Searching for Hellbreak ZIP...")
+
+          archives = list(root.glob("*.zip"))
+
+          if not archives:
+              raise RuntimeError(
+                  "Neither project files nor ZIP archive found!"
+              )
+
+          archive = archives[0]
+
+          print("Archive:", archive.name)
+
+          extract_dir = root / "_hellbreak_extracted"
+          extract_dir.mkdir(exist_ok=True)
+
+          with zipfile.ZipFile(archive, "r") as z:
+              bad = z.testzip()
+
+              if bad:
+                  raise RuntimeError(
+                      f"Corrupted archive entry: {bad}"
+                  )
+
+              for member in z.infolist():
+                  destination = (
+                      extract_dir / member.filename
+                  ).resolve()
+
+                  if not destination.is_relative_to(
+                      extract_dir.resolve()
+                  ):
+                      raise RuntimeError(
+                          "Unsafe path inside ZIP"
+                      )
+
+              z.extractall(extract_dir)
+
+          projects = [
+              p.parent
+              for p in extract_dir.rglob("CMakeLists.txt")
+              if valid_project(p.parent)
+          ]
+
+          if not projects:
+              raise RuntimeError(
+                  "Hellbreak project not found inside ZIP!"
+              )
+
+          if len(projects) > 1:
+              raise RuntimeError(
+                  "Multiple projects found inside ZIP!"
+              )
+
+          project = projects[0]
+
+          print("Project directory:", project)
+
+          for item in project.iterdir():
+              destination = root / item.name
+
+              if destination.exists():
+                  raise RuntimeError(
+                      f"Destination already exists: {item.name}"
+                  )
+
+              if item.is_dir():
+                  shutil.copytree(item, destination)
+              else:
+                  shutil.copy2(item, destination)
+
+          print("Hellbreak extracted successfully!")
+          '@ | Set-Content extract.py -Encoding utf8
+
+          python extract.py
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Project extraction failed!"
+          }
+
+      - name: Verify source files
+        shell: pwsh
+        run: |
+          $required = @(
+            "CMakeLists.txt",
+            "src/main.cpp",
+            "src/Game.h",
+            "src/Game.cpp",
+            "src/Engine/Renderer.h",
+            "src/Engine/Renderer.cpp",
+            "src/Engine/Raycaster.h",
+            "src/Engine/Raycaster.cpp",
+            "src/World/Map.h",
+            "src/World/Map.cpp",
+            "src/World/Player.h",
+            "src/World/Player.cpp",
+            "src/World/Enemy.h",
+            "src/World/Enemy.cpp"
+          )
+
+          foreach ($file in $required) {
+            if (-not (Test-Path $file)) {
+              throw "Missing file: $file"
+            }
+
+            Write-Host "OK: $file"
+          }
+
+      - name: Setup Visual Studio compiler
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure CMake
+        shell: pwsh
+        run: |
+          cmake -S . -B build `
+            -G "Visual Studio 17 2022" `
+            -A x64 `
+            -DFETCHCONTENT_QUIET=OFF
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "CMake configuration failed!"
+          }
+
+      - name: Build Hellbreak
+        shell: pwsh
+        run: |
+          cmake --build build `
+            --config Release `
+            --parallel 2
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Hellbreak compilation failed!"
+          }
+
+      - name: Package Windows game
+        shell: pwsh
+        run: |
+          $exe = "build/Release/Hellbreak.exe"
+
+          if (-not (Test-Path $exe)) {
+            throw "Hellbreak.exe not found!"
+          }
+
+          New-Item -ItemType Directory `
+            -Path dist `
+            -Force | Out-Null
+
+          Copy-Item $exe "dist/Hellbreak.exe"
+
+          Compress-Archive `
+            -Path "dist/*" `
+            -DestinationPath "Hellbreak-Windows.zip" `
+            -Force
+
+      - name: Upload game
+        uses: actions/upload-artifact@v4
+        with:
+          name: Hellbreak-Windows
+          path: Hellbreak-Windows.zip
+          if-no-files-found: error
+          retention-days: 30
